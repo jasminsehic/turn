@@ -5,8 +5,9 @@
 package main
 
 import (
-	"flag"
 	"encoding/binary"
+	"errors"
+	"flag"
 	"log"
 	"net"
 	"os"
@@ -14,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 	"syscall"
+	"time"
 
 	"github.com/pion/logging"
 	"github.com/pion/stun/v4"
@@ -26,7 +27,8 @@ import (
 type counters struct {
 	controlIn, controlOut, controlErrors atomic.Uint64
 	channelIn, channelOut atomic.Uint64
-	relayIn, relayOut, relayReadErrors, relayWriteErrors atomic.Uint64
+	relayIn, relayOut, relayBytesIn, relayBytesOut atomic.Uint64
+	relayReadErrors, relayWriteErrors atomic.Uint64
 }
 
 // stunLogger observes the client-to-TURN listening socket, including ChannelData.
@@ -112,10 +114,13 @@ type relayLogger struct {
 func (r *relayLogger) ReadFrom(p []byte) (int, net.Addr, error) {
 	n, addr, err := r.PacketConn.ReadFrom(p)
 	if err != nil {
-		r.stats.relayReadErrors.Add(1)
-		log.Printf("TURN_RELAY_READ_ERROR local=%s error=%v", r.LocalAddr(), err)
+		if !errors.Is(err, net.ErrClosed) {
+			r.stats.relayReadErrors.Add(1)
+			log.Printf("TURN_RELAY_READ_ERROR local=%s error=%v", r.LocalAddr(), err)
+		}
 	} else {
 		r.stats.relayIn.Add(1)
+		r.stats.relayBytesIn.Add(uint64(n))
 		if r.trace {
 			log.Printf("TURN_RELAY_IN local=%s peer=%s bytes=%d", r.LocalAddr(), addr, n)
 		}
@@ -130,6 +135,7 @@ func (r *relayLogger) WriteTo(p []byte, addr net.Addr) (int, error) {
 		log.Printf("TURN_RELAY_WRITE_ERROR local=%s peer=%s bytes=%d error=%v", r.LocalAddr(), addr, len(p), err)
 	} else {
 		r.stats.relayOut.Add(1)
+		r.stats.relayBytesOut.Add(uint64(n))
 		if r.trace {
 			log.Printf("TURN_RELAY_OUT local=%s peer=%s bytes=%d", r.LocalAddr(), addr, n)
 		}
@@ -156,11 +162,12 @@ func (r *relayGenerator) AllocatePacketConn(cfg turn.AllocateListenerConfig) (ne
 }
 
 func logStats(stats *counters, activeAllocations int) {
-	log.Printf("TURN_STATS allocations=%d control_in=%d control_out=%d errors=%d channel_in=%d channel_out=%d relay_in=%d relay_out=%d relay_read_errors=%d relay_write_errors=%d",
+	log.Printf("TURN_STATS allocations=%d control_in=%d control_out=%d errors=%d channel_in=%d channel_out=%d relay_in=%d relay_out=%d relay_bytes_in=%d relay_bytes_out=%d relay_read_errors=%d relay_write_errors=%d",
 		activeAllocations,
 		stats.controlIn.Load(), stats.controlOut.Load(), stats.controlErrors.Load(),
 		stats.channelIn.Load(), stats.channelOut.Load(), stats.relayIn.Load(),
-		stats.relayOut.Load(), stats.relayReadErrors.Load(), stats.relayWriteErrors.Load())
+		stats.relayOut.Load(), stats.relayBytesIn.Load(), stats.relayBytesOut.Load(),
+		stats.relayReadErrors.Load(), stats.relayWriteErrors.Load())
 }
 
 func diagnosticEvents(traceAuth bool) turn.EventHandler {
